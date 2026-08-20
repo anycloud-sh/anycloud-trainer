@@ -246,3 +246,23 @@ def test_wire_rejects_nonfinite_learning_rate_and_unencrypted_artifact_urls() ->
     assert saved.status_code == 422
     assert runtime.batches == []
     assert runtime.saves == []
+
+
+def test_wire_keeps_checkpoint_resume_and_sampling_load_mutually_exclusive() -> None:
+    """A session cannot mix optimizer-state restoration with final-adapter loading."""
+    client, runtime = _client()
+    response = client.post(
+        "/v1/sessions",
+        headers=_headers(),
+        json={
+            "base_model": "Qwen/Qwen3.5-4B",
+            "model_revision": "b" * 40,
+            "lora_rank": 8,
+            "seed": 0,
+            "resume_download_url": "https://objects.example/state",
+            "sampling_download_url": "https://objects.example/adapter",
+        },
+    )
+
+    assert response.status_code == 422
+    assert runtime.opens == []

@@ -48,6 +48,12 @@ POST /v1/sessions/{session_id}/artifacts:save
 active. Artifact upload and restore URLs are short lived. They are used in memory and never
 returned as model handles or written to WMO evidence.
 
+The matching WMO [`AnyCloudTrainerBackend`](https://github.com/anycloud-sh/world-model-optimizer/tree/25af24b478e307e565d68afb9dacb53f11ac6469)
+uses the existing injected `TrainerBackend` seam. The caller retains the authenticated HTTP client
+and object-store authority; WMO persists only opaque `s3://` resource identities. The
+[`validation controller`](validation/run_wmo_adapter.py) exercises initial training, restart from
+optimizer state, and a fresh load of the exported PEFT adapter in separate GPU services.
+
 ## Development
 
 ```bash

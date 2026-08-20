@@ -73,14 +73,22 @@ class OpenSessionRequest(ContractModel):
     seed: int = Field(ge=0, le=2**32 - 1)
     maximum_datum_tokens: int | None = Field(default=None, gt=1)
     resume_download_url: HttpUrl | None = None
+    sampling_download_url: HttpUrl | None = None
 
-    @field_validator("resume_download_url")
+    @field_validator("resume_download_url", "sampling_download_url")
     @classmethod
-    def require_https_resume_url(cls, value: HttpUrl | None) -> HttpUrl | None:
+    def require_https_download_url(cls, value: HttpUrl | None) -> HttpUrl | None:
         """Allow artifact restore only through an encrypted transfer URL."""
         if value is not None and value.scheme != "https":
-            raise ValueError("resume_download_url must use HTTPS")
+            raise ValueError("artifact download URLs must use HTTPS")
         return value
+
+    @model_validator(mode="after")
+    def require_one_restore_source(self) -> OpenSessionRequest:
+        """Keep resumable optimizer state distinct from final sampling adapters."""
+        if self.resume_download_url is not None and self.sampling_download_url is not None:
+            raise ValueError("only one artifact restore URL may be supplied")
+        return self
 
 
 class OpenSessionResponse(ContractModel):

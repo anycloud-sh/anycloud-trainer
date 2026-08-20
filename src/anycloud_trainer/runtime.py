@@ -21,6 +21,7 @@ from peft import (
     get_peft_model_state_dict,
     set_peft_model_state_dict,
 )
+from safetensors.torch import load_file as load_safetensors
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -42,6 +43,8 @@ from anycloud_trainer.contracts import (
     TrainBatchResponse,
 )
 from anycloud_trainer.errors import TrainerServiceError
+
+_MAX_ARTIFACT_BYTES = 8 * 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,7 @@ class HuggingFaceTrainerRuntime:
                     task_type="CAUSAL_LM",
                     target_modules="all-linear",
                     exclude_modules=r".*visual.*",
+                    revision=request.model_revision,
                 ),
             )
             model.train()
@@ -142,6 +146,12 @@ class HuggingFaceTrainerRuntime:
                     request=request,
                     model=model,
                     optimizer=optimizer,
+                )
+            elif request.sampling_download_url is not None:
+                self._restore_sampling(
+                    str(request.sampling_download_url),
+                    request=request,
+                    model=model,
                 )
             session_id = uuid.uuid4().hex
             self._session = _Session(
@@ -300,20 +310,24 @@ class HuggingFaceTrainerRuntime:
                 with tarfile.open(artifact_path, "w:gz") as archive:
                     archive.add(adapter_directory, arcname="adapter")
             digest = _sha256_file(artifact_path)
-            payload = artifact_path.read_bytes()
+            size_bytes = artifact_path.stat().st_size
             try:
-                response = httpx.put(
-                    str(request.upload_url),
-                    content=payload,
-                    headers={"Content-Type": "application/octet-stream"},
-                    timeout=900,
-                )
+                with artifact_path.open("rb") as payload:
+                    response = httpx.put(
+                        str(request.upload_url),
+                        content=iter(lambda: payload.read(1024 * 1024), b""),
+                        headers={
+                            "Content-Length": str(size_bytes),
+                            "Content-Type": "application/octet-stream",
+                        },
+                        timeout=900,
+                    )
                 response.raise_for_status()
             except httpx.HTTPError as exc:
                 raise TrainerServiceError(
                     "the trainer artifact upload failed", status_code=502
                 ) from exc
-            return SaveArtifactResponse(sha256=digest, size_bytes=len(payload))
+            return SaveArtifactResponse(sha256=digest, size_bytes=size_bytes)
 
     def _require_session(self, session_id: str) -> _Session:
         """Return the live session only when the exact opaque identity matches."""
@@ -331,15 +345,12 @@ class HuggingFaceTrainerRuntime:
         optimizer: Any,
     ) -> None:
         """Download and verify one state artifact before applying any weight change."""
-        try:
-            response = httpx.get(download_url, timeout=900)
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise TrainerServiceError("the trainer state download failed", status_code=502) from exc
         with tempfile.NamedTemporaryFile(prefix="anycloud-state-", suffix=".pt") as state_file:
-            state_file.write(response.content)
-            state_file.flush()
-            state = torch.load(state_file.name, map_location="cpu", weights_only=True)
+            _download_artifact(download_url, Path(state_file.name), kind="state")
+            try:
+                state = torch.load(state_file.name, map_location="cpu", weights_only=True)
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise TrainerServiceError("the trainer state is invalid") from exc
         if not isinstance(state, dict):
             raise TrainerServiceError("the trainer state has an invalid root value")
         expected = (
@@ -375,6 +386,50 @@ class HuggingFaceTrainerRuntime:
             raise TrainerServiceError("the trainer state could not be restored") from exc
         _move_optimizer_state(optimizer, device=torch.device("cuda"))
 
+    def _restore_sampling(
+        self,
+        download_url: str,
+        *,
+        request: OpenSessionRequest,
+        model: Any,
+    ) -> None:
+        """Load one exported standard PEFT adapter into a fresh base model."""
+        with tempfile.TemporaryDirectory(prefix="anycloud-sampling-") as directory:
+            root = Path(directory)
+            archive_path = root / "sampling-adapter.tar.gz"
+            _download_artifact(download_url, archive_path, kind="sampling adapter")
+            extraction_root = root / "extracted"
+            extraction_root.mkdir()
+            try:
+                with tarfile.open(archive_path, "r:gz") as archive:
+                    _extract_regular_files(archive, extraction_root)
+            except (OSError, tarfile.TarError) as exc:
+                raise TrainerServiceError("the sampling adapter archive is invalid") from exc
+            adapter_root = extraction_root / "adapter"
+            config_path = adapter_root / "adapter_config.json"
+            weights_path = adapter_root / "adapter_model.safetensors"
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise TrainerServiceError("the sampling adapter config is invalid") from exc
+            if not isinstance(config, dict):
+                raise TrainerServiceError("the sampling adapter config is invalid")
+            expected = (request.base_model, request.model_revision, request.lora_rank)
+            observed = (
+                config.get("base_model_name_or_path"),
+                config.get("revision"),
+                config.get("r"),
+            )
+            if observed != expected:
+                raise TrainerServiceError(
+                    "the sampling adapter does not match the requested model settings"
+                )
+            try:
+                adapter_state = load_safetensors(weights_path, device="cpu")
+                set_peft_model_state_dict(model, adapter_state)
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                raise TrainerServiceError("the sampling adapter weights are invalid") from exc
+
 
 def _verify_cuda_execution() -> bool:
     """Prove that the visible accelerator can allocate, launch work, and synchronize."""
@@ -387,6 +442,40 @@ def _verify_cuda_execution() -> bool:
         return float(result.cpu()[0]) == 6.0
     except RuntimeError:
         return False
+
+
+def _download_artifact(url: str, path: Path, *, kind: str) -> None:
+    """Stream one bounded caller-authorized artifact without retaining its URL."""
+    try:
+        with httpx.stream("GET", url, timeout=900) as response:
+            response.raise_for_status()
+            declared_size = response.headers.get("Content-Length")
+            if declared_size is not None and int(declared_size) > _MAX_ARTIFACT_BYTES:
+                raise TrainerServiceError(f"the trainer {kind} exceeds the size limit")
+            size_bytes = 0
+            with path.open("wb") as destination:
+                for chunk in response.iter_bytes(1024 * 1024):
+                    size_bytes += len(chunk)
+                    if size_bytes > _MAX_ARTIFACT_BYTES:
+                        raise TrainerServiceError(f"the trainer {kind} exceeds the size limit")
+                    destination.write(chunk)
+    except (httpx.HTTPError, OSError, ValueError) as exc:
+        raise TrainerServiceError(f"the trainer {kind} download failed", status_code=502) from exc
+
+
+def _extract_regular_files(archive: tarfile.TarFile, root: Path) -> None:
+    """Extract only bounded regular files beneath the dedicated temporary root."""
+    resolved_root = root.resolve()
+    members = archive.getmembers()
+    if len(members) > 10_000 or sum(member.size for member in members) > _MAX_ARTIFACT_BYTES:
+        raise TrainerServiceError("the sampling adapter archive exceeds the extraction limit")
+    for member in members:
+        destination = (root / member.name).resolve()
+        if resolved_root != destination and resolved_root not in destination.parents:
+            raise TrainerServiceError("the sampling adapter archive contains an unsafe path")
+        if not member.isfile() and not member.isdir():
+            raise TrainerServiceError("the sampling adapter archive contains an unsafe member")
+        archive.extract(member, path=root)
 
 
 def _message_payload(message: ConversationMessage) -> dict[str, object]:
