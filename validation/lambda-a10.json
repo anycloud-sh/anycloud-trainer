@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "result": "passed",
+  "validated_at": "2026-08-20T16:50:25Z",
+  "image": {
+    "candidate": "ghcr.io/anycloud-sh/anycloud-trainer:candidate-15e8fe5b5c2912e84e9ffe59bbd3640c182f6ee4",
+    "immutable_reference": "ghcr.io/anycloud-sh/anycloud-trainer@sha256:1f18acebd0918a74c7d0c6955e8f351a1276d84878fc2c819445397b26fb258f",
+    "manifest_digest": "sha256:1f18acebd0918a74c7d0c6955e8f351a1276d84878fc2c819445397b26fb258f",
+    "platform": "linux/amd64",
+    "platform_digest": "sha256:18abbbbd9d1fc3b34476f4e7b8f69964cb3a4944847948d379c54c5bc8f182fe",
+    "source_revision": "15e8fe5b5c2912e84e9ffe59bbd3640c182f6ee4",
+    "build_workflow": "Test and publish candidate",
+    "build_run_id": 32390860341,
+    "build_url": "https://github.com/anycloud-sh/anycloud-trainer/actions/runs/32390860341",
+    "anonymous_pull_verified": true,
+    "package_connected_repository": "https://github.com/anycloud-sh/anycloud-trainer"
+  },
+  "workload": {
+    "repository": "https://github.com/anycloud-sh/world-model-optimizer",
+    "upstream_revision": "b7593f7e5a1da047012edde1981e3efec34f0d9c",
+    "adapter_revision": "25af24b478e307e565d68afb9dacb53f11ac6469",
+    "adapter_branch": "anycloud-trainer-backend",
+    "model": "Qwen/Qwen3.5-4B",
+    "model_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "lora_rank": 8,
+    "maximum_datum_tokens": 128,
+    "example_count": 1
+  },
+  "compute": {
+    "provider": "Lambda",
+    "region": "us-east-1",
+    "vm_type": "gpu_1x_a10",
+    "gpu_count": 1,
+    "spot": false,
+    "rate_per_hour_usd": 1.29,
+    "estimated_total_cost_usd": 0.7554447833333333,
+    "cost_source": "estimated"
+  },
+  "storage": {
+    "provider": "S3",
+    "bucket": "anycloud-wmo-trainer-validation-260820-afc0e164",
+    "region": "us-west-2",
+    "prefix": "validation-15e8fe5-r3-260820",
+    "private": true,
+    "server_side_encryption": "AES256",
+    "signature_version": "s3v4",
+    "versioning": true,
+    "expiration_days": 30,
+    "signed_urls_retained": false
+  },
+  "deployments": [
+    {
+      "role": "initial",
+      "id": "wmo-trainer-q35-g-260820",
+      "state": "terminated",
+      "duration_ms": 700119,
+      "estimated_cost_usd": 0.25087597500000003
+    },
+    {
+      "role": "resume",
+      "id": "wmo-trainer-q35-h-260820",
+      "state": "terminated",
+      "duration_ms": 686388,
+      "estimated_cost_usd": 0.2459557
+    },
+    {
+      "role": "load",
+      "id": "wmo-trainer-q35-i-260820",
+      "state": "terminated",
+      "duration_ms": 721711,
+      "estimated_cost_usd": 0.25861310833333334
+    }
+  ],
+  "phases": {
+    "initial": {
+      "started_at": "2026-08-20T16:37:20.078161+00:00",
+      "completed_at": "2026-08-20T16:37:49.973849+00:00",
+      "elapsed_seconds": 29.895,
+      "health_before": {
+        "status": "ok",
+        "cuda_available": true,
+        "cuda_verified": true,
+        "active_session": false
+      },
+      "health_after": {
+        "status": "ok",
+        "cuda_available": true,
+        "cuda_verified": true,
+        "active_session": true
+      },
+      "example_id": "anycloud-validation-example",
+      "input_token_count": 38,
+      "supervised_token_count": 5,
+      "loss": 0.002257527783513069,
+      "gradient_norm": 0.14250999181223037,
+      "api_statuses": {
+        "health_before": 200,
+        "open_session": 200,
+        "render": 200,
+        "train": 200,
+        "save": 200,
+        "health_after": 200
+      },
+      "artifact": {
+        "kind": "resumable_state",
+        "resource_id": "s3://anycloud-wmo-trainer-validation-260820-afc0e164/validation-15e8fe5-r3-260820/state/step-000001.pt",
+        "sha256": "d7c84a2e97d714abd9402c0df8e61836fc53e5a71fd8971afa92c764ddcaeb34",
+        "size_bytes": 195391045,
+        "etag": "c43317bb4634bbcf7e06b154bb130dff",
+        "version_id": "se53.NntF.Ql324GuVS5I8CNtNV5hO1T",
+        "encryption": "AES256"
+      }
+    },
+    "resume": {
+      "started_at": "2026-08-20T16:42:58.243686+00:00",
+      "completed_at": "2026-08-20T16:43:45.127856+00:00",
+      "elapsed_seconds": 46.89,
+      "health_before": {
+        "status": "ok",
+        "cuda_available": true,
+        "cuda_verified": true,
+        "active_session": false
+      },
+      "health_after": {
+        "status": "ok",
+        "cuda_available": true,
+        "cuda_verified": true,
+        "active_session": true
+      },
+      "restored_from": "s3://anycloud-wmo-trainer-validation-260820-afc0e164/validation-15e8fe5-r3-260820/state/step-000001.pt",
+      "example_id": "anycloud-validation-example",
+      "input_token_count": 38,
+      "supervised_token_count": 5,
+      "loss": 0.0020052019972354174,
+      "gradient_norm": 0.1363655787456938,
+      "transient_edge_statuses_before_ready": [530, 530],
+      "api_statuses": {
+        "health_before": 200,
+        "open_session": 200,
+        "render": 200,
+        "train": 200,
+        "save": 200,
+        "health_after": 200
+      },
+      "artifact": {
+        "kind": "peft_sampling_adapter",
+        "resource_id": "s3://anycloud-wmo-trainer-validation-260820-afc0e164/validation-15e8fe5-r3-260820/sampling/final-adapter.tar.gz",
+        "sha256": "a9c298ae382f9e7a49ef8117d310f57dbb41897ad2cecf037550076e4cb534bd",
+        "size_bytes": 57526030,
+        "etag": "5354d3a54227ec1cbde273147ef72590",
+        "version_id": "_KEREBUfDPu_8Zk7Wjcg9PyNKkYxp6Su",
+        "encryption": "AES256"
+      }
+    },
+    "load": {
+      "started_at": "2026-08-20T16:50:01.247260+00:00",
+      "completed_at": "2026-08-20T16:50:24.538841+00:00",
+      "elapsed_seconds": 23.292,
+      "health_before": {
+        "status": "ok",
+        "cuda_available": true,
+        "cuda_verified": true,
+        "active_session": false
+      },
+      "health_after": {
+        "status": "ok",
+        "cuda_available": true,
+        "cuda_verified": true,
+        "active_session": true
+      },
+      "loaded": true,
+      "loaded_from": "s3://anycloud-wmo-trainer-validation-260820-afc0e164/validation-15e8fe5-r3-260820/sampling/final-adapter.tar.gz",
+      "rendered_example_id": "anycloud-validation-example",
+      "supervised_token_count": 5,
+      "api_statuses": {
+        "health_before": 200,
+        "open_session": 200,
+        "render": 200,
+        "health_after": 200
+      }
+    }
+  },
+  "assertions": {
+    "real_cuda_training_completed": true,
+    "finite_initial_loss_and_gradient_norm": true,
+    "checkpoint_restored_after_restart": true,
+    "finite_resumed_loss_and_gradient_norm": true,
+    "portable_peft_adapter_loaded_after_restart": true,
+    "all_services_terminated": true,
+    "secret_values_retained": false
+  }
+}

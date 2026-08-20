@@ -21,6 +21,51 @@ jobs:
   promote:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+      - name: Require matching Lambda validation evidence
+        env:
+          DIGEST: ${{ inputs.digest }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "digest must be one lowercase sha256 value" >&2
+            exit 2
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tag must be a v-prefixed semantic version" >&2
+            exit 2
+          fi
+          jq -e --arg digest "$DIGEST" '
+            .schema_version == 1 and
+            .result == "passed" and
+            .image.manifest_digest == $digest and
+            .image.source_revision == "15e8fe5b5c2912e84e9ffe59bbd3640c182f6ee4" and
+            .image.platform_digest == "sha256:18abbbbd9d1fc3b34476f4e7b8f69964cb3a4944847948d379c54c5bc8f182fe" and
+            .image.anonymous_pull_verified == true and
+            .workload.repository == "https://github.com/anycloud-sh/world-model-optimizer" and
+            .workload.upstream_revision == "b7593f7e5a1da047012edde1981e3efec34f0d9c" and
+            .workload.adapter_revision == "25af24b478e307e565d68afb9dacb53f11ac6469" and
+            .workload.model_revision == "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a" and
+            .compute.provider == "Lambda" and
+            .compute.vm_type == "gpu_1x_a10" and
+            all(.deployments[]; .state == "terminated") and
+            .phases.initial.health_before.cuda_verified == true and
+            .phases.initial.health_after.cuda_verified == true and
+            (.phases.initial.loss | type == "number") and
+            (.phases.initial.gradient_norm | type == "number") and
+            .phases.initial.api_statuses.save == 200 and
+            .phases.resume.health_before.cuda_verified == true and
+            .phases.resume.health_after.cuda_verified == true and
+            (.phases.resume.loss | type == "number") and
+            (.phases.resume.gradient_norm | type == "number") and
+            .phases.resume.restored_from == .phases.initial.artifact.resource_id and
+            .phases.resume.api_statuses.save == 200 and
+            .phases.load.health_before.cuda_verified == true and
+            .phases.load.health_after.cuda_verified == true and
+            .phases.load.loaded == true and
+            .phases.load.loaded_from == .phases.resume.artifact.resource_id and
+            .phases.load.api_statuses.render == 200
+          ' validation/lambda-a10.json >/dev/null
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -32,11 +77,10 @@ jobs:
           DIGEST: ${{ inputs.digest }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          case "$DIGEST" in
-            sha256:[0-9a-f][0-9a-f]*) ;;
-            *) echo "digest must start with sha256:" >&2; exit 2 ;;
-          esac
           docker buildx imagetools create \
             --tag "ghcr.io/anycloud-sh/anycloud-trainer:${RELEASE_TAG}" \
             "ghcr.io/anycloud-sh/anycloud-trainer@${DIGEST}"
-
+          promoted_digest=$(docker buildx imagetools inspect \
+            "ghcr.io/anycloud-sh/anycloud-trainer:${RELEASE_TAG}" |
+            awk '/^Digest:/ {print $2; exit}')
+          test "$promoted_digest" = "$DIGEST"

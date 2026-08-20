@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 import boto3
 import httpx
+from botocore.config import Config
 from pydantic import SecretStr
 from wmo.common.core.artifacts import ArtifactInput
 from wmo.common.models import AssistantAction
@@ -53,7 +54,15 @@ class _S3ArtifactStore:
         """Bind one caller-owned private validation prefix."""
         self._bucket = bucket
         self._prefix = prefix.strip("/")
-        self._client = boto3.client("s3", region_name=region)
+        self._client = boto3.client(
+            "s3",
+            region_name=region,
+            endpoint_url=f"https://s3.{region}.amazonaws.com",
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "virtual"},
+            ),
+        )
 
     def begin_upload(
         self, *, kind: Literal["state", "sampling"], name: str
@@ -202,6 +211,40 @@ def _client(service_url: str, token: str, journal: _ResponseJournal) -> httpx.Cl
         headers={"Authorization": f"Bearer {token}"},
         timeout=httpx.Timeout(1800, connect=60),
         event_hooks={"response": [journal.record]},
+        trust_env=False,
+    )
+
+
+def _health(client: httpx.Client) -> dict[str, object]:
+    """Wait through transient edge routing while requiring a verified CUDA response."""
+    last_status: int | None = None
+    last_content_type: str | None = None
+    last_size: int | None = None
+    last_error: str | None = None
+    for attempt in range(1, 13):
+        try:
+            response = client.get("/healthz")
+            last_status = response.status_code
+            last_content_type = response.headers.get("content-type")
+            last_size = len(response.content)
+            response.raise_for_status()
+            body = response.json()
+            if (
+                isinstance(body, dict)
+                and body.get("status") == "ok"
+                and body.get("cuda_available") is True
+                and body.get("cuda_verified") is True
+            ):
+                return body
+            last_error = "response did not report verified CUDA"
+        except (httpx.HTTPError, json.JSONDecodeError) as exc:
+            last_error = type(exc).__name__
+        if attempt < 12:
+            time.sleep(5)
+    raise RuntimeError(
+        "health endpoint did not stabilize "
+        f"(status={last_status}, content_type={last_content_type!r}, "
+        f"response_bytes={last_size}, error={last_error})"
     )
 
 
@@ -229,7 +272,7 @@ def _run_training_phase(
     started_at = datetime.now(UTC).isoformat()
     started = time.monotonic()
     with _client(service_url, token, journal) as client:
-        health_before = client.get("/healthz").json()
+        health_before = _health(client)
         session = _backend(client, store).open(_spec(), resume_resource_id)
         (datum,) = session.render_examples((_example(),))
         result = session.train_batch((datum,), learning_rate=_spec().learning_rate)
@@ -237,7 +280,7 @@ def _run_training_phase(
             resource_id = session.save_state("step-000001.pt")
         else:
             resource_id = session.save_sampling_handle("final-adapter.tar.gz")
-        health_after = client.get("/healthz").json()
+        health_after = _health(client)
     return {
         "phase": phase,
         "started_at": started_at,
@@ -268,7 +311,7 @@ def _run_load_phase(
     started = time.monotonic()
     sampling_url = store.download_url(sampling_resource_id).get_secret_value()
     with _client(service_url, token, journal) as client:
-        health_before = client.get("/healthz").json()
+        health_before = _health(client)
         response = client.post(
             "/v1/sessions",
             json={
@@ -288,7 +331,7 @@ def _run_load_phase(
             session_id=session_id,
         )
         (datum,) = session.render_examples((_example(),))
-        health_after = client.get("/healthz").json()
+        health_after = _health(client)
     return {
         "phase": "load",
         "started_at": started_at,
