@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sys
 import time
 from dataclasses import asdict, dataclass
@@ -137,6 +138,30 @@ def _parse_s3_resource(resource_id: str) -> tuple[str, str]:
     return parsed.netloc, parsed.path.lstrip("/")
 
 
+def _install_service_resolution(service_url: str, resolve_ip: str | None) -> None:
+    """Override only the service hostname when the local resolver cached pre-DNS NXDOMAIN."""
+    if resolve_ip is None:
+        return
+    service_host = urlsplit(service_url).hostname
+    if service_host is None:
+        raise ValueError("service URL must contain a hostname")
+    original = socket.getaddrinfo
+
+    def resolve(
+        host: str,
+        port: int,
+        family: int = 0,
+        type_: int = 0,
+        proto: int = 0,
+        flags: int = 0,
+    ) -> list[tuple[int, int, int, str, tuple[object, ...]]]:
+        """Resolve the one fresh service host to its already-verified public edge."""
+        selected = resolve_ip if host == service_host else host
+        return original(selected, port, family, type_, proto, flags)
+
+    socket.getaddrinfo = resolve
+
+
 def _spec() -> TinkerSFTSpec:
     """Return the exact bounded validation settings used in all three phases."""
     return TinkerSFTSpec(
@@ -185,7 +210,7 @@ def _backend(client: httpx.Client, store: _S3ArtifactStore) -> AnyCloudTrainerBa
     return AnyCloudTrainerBackend(
         client,
         store,
-        price_per_hour_usd=1.09,
+        price_per_hour_usd=1.29,
         maximum_step_seconds=900,
         model_revision=MODEL_REVISION,
     )
@@ -201,6 +226,7 @@ def _run_training_phase(
 ) -> dict[str, object]:
     """Run one optimizer step and save state or a final sampling adapter."""
     journal = _ResponseJournal()
+    started_at = datetime.now(UTC).isoformat()
     started = time.monotonic()
     with _client(service_url, token, journal) as client:
         health_before = client.get("/healthz").json()
@@ -214,7 +240,8 @@ def _run_training_phase(
         health_after = client.get("/healthz").json()
     return {
         "phase": phase,
-        "started_at": datetime.now(UTC).isoformat(),
+        "started_at": started_at,
+        "completed_at": datetime.now(UTC).isoformat(),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "service_url": service_url,
         "health_before": health_before,
@@ -237,6 +264,7 @@ def _run_load_phase(
 ) -> dict[str, object]:
     """Load the exported adapter into a fresh GPU process and render a WMO datum."""
     journal = _ResponseJournal()
+    started_at = datetime.now(UTC).isoformat()
     started = time.monotonic()
     sampling_url = store.download_url(sampling_resource_id).get_secret_value()
     with _client(service_url, token, journal) as client:
@@ -263,7 +291,8 @@ def _run_load_phase(
         health_after = client.get("/healthz").json()
     return {
         "phase": "load",
-        "started_at": datetime.now(UTC).isoformat(),
+        "started_at": started_at,
+        "completed_at": datetime.now(UTC).isoformat(),
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "service_url": service_url,
         "health_before": health_before,
@@ -281,6 +310,7 @@ def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("initial", "resume", "load"), required=True)
     parser.add_argument("--service-url", required=True)
+    parser.add_argument("--resolve-ip")
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--bucket-region", default="us-west-2")
     parser.add_argument("--prefix", required=True)
@@ -295,6 +325,7 @@ def main() -> None:
     token = os.environ.get("TRAINER_TOKEN")
     if not token:
         raise RuntimeError("TRAINER_TOKEN must be set")
+    _install_service_resolution(arguments.service_url, arguments.resolve_ip)
     store = _S3ArtifactStore(
         bucket=arguments.bucket,
         prefix=arguments.prefix,

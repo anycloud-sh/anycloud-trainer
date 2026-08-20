@@ -30,7 +30,6 @@ from transformers import (
 )
 
 from anycloud_trainer.contracts import (
-    ConversationMessage,
     HealthResponse,
     OpenSessionRequest,
     OpenSessionResponse,
@@ -43,6 +42,7 @@ from anycloud_trainer.contracts import (
     TrainBatchResponse,
 )
 from anycloud_trainer.errors import TrainerServiceError
+from anycloud_trainer.rendering import render_final_assistant
 
 _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024 * 1024
 
@@ -171,51 +171,19 @@ class HuggingFaceTrainerRuntime:
         rendered: list[RenderedDatum] = []
         with session.lock:
             for example in request.examples:
-                messages = [_message_payload(message) for message in example.messages]
-                full_tokens = _token_ids(
-                    session.tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=True,
-                        add_generation_prompt=False,
-                    )
+                rendered_tokens = render_final_assistant(
+                    session.tokenizer,
+                    example.messages,
+                    maximum_tokens=session.request.maximum_datum_tokens,
+                    example_id=example.example_id,
                 )
-                prefix_tokens = _token_ids(
-                    session.tokenizer.apply_chat_template(
-                        messages[:-1],
-                        tokenize=True,
-                        add_generation_prompt=True,
-                    )
-                )
-                if full_tokens[: len(prefix_tokens)] != prefix_tokens:
-                    raise TrainerServiceError(
-                        "the model chat template did not preserve the target boundary for "
-                        f"{example.example_id}"
-                    )
-                prefix_length = len(prefix_tokens)
-                maximum_tokens = session.request.maximum_datum_tokens
-                if maximum_tokens is not None and len(full_tokens) > maximum_tokens:
-                    trim_count = len(full_tokens) - maximum_tokens
-                    if trim_count > prefix_length:
-                        raise TrainerServiceError(
-                            "maximum_datum_tokens cannot retain the complete supervised target "
-                            f"for {example.example_id}"
-                        )
-                    full_tokens = full_tokens[trim_count:]
-                    prefix_length -= trim_count
-                supervised_token_count = len(full_tokens) - prefix_length
-                if supervised_token_count <= 0:
-                    raise TrainerServiceError(
-                        "the model chat template produced no supervised tokens for "
-                        f"{example.example_id}"
-                    )
-                labels = (-100,) * prefix_length + tuple(full_tokens[prefix_length:])
                 datum_id = hashlib.sha256(
                     json.dumps(
                         {
                             "session_id": session_id,
                             "example_id": example.example_id,
-                            "tokens": full_tokens,
-                            "labels": labels,
+                            "tokens": rendered_tokens.input_ids,
+                            "labels": rendered_tokens.labels,
                         },
                         separators=(",", ":"),
                     ).encode()
@@ -223,16 +191,16 @@ class HuggingFaceTrainerRuntime:
                 datum = _Datum(
                     datum_id=datum_id,
                     example_id=example.example_id,
-                    input_ids=tuple(full_tokens),
-                    labels=labels,
-                    supervised_token_count=supervised_token_count,
+                    input_ids=rendered_tokens.input_ids,
+                    labels=rendered_tokens.labels,
+                    supervised_token_count=rendered_tokens.supervised_token_count,
                 )
                 session.datums[datum_id] = datum
                 rendered.append(
                     RenderedDatum(
                         datum_id=datum_id,
                         example_id=example.example_id,
-                        supervised_token_count=supervised_token_count,
+                        supervised_token_count=rendered_tokens.supervised_token_count,
                     )
                 )
         return RenderExamplesResponse(datums=tuple(rendered))
@@ -476,25 +444,6 @@ def _extract_regular_files(archive: tarfile.TarFile, root: Path) -> None:
         if not member.isfile() and not member.isdir():
             raise TrainerServiceError("the sampling adapter archive contains an unsafe member")
         archive.extract(member, path=root)
-
-
-def _message_payload(message: ConversationMessage) -> dict[str, object]:
-    """Convert one validated message into the sparse mapping expected by chat templates."""
-    payload: dict[str, object] = {"role": message.role, "content": message.content}
-    if message.tool_calls:
-        payload["tool_calls"] = [call.model_dump(mode="json") for call in message.tool_calls]
-    if message.tool_call_id is not None:
-        payload["tool_call_id"] = message.tool_call_id
-    if message.name is not None:
-        payload["name"] = message.name
-    return payload
-
-
-def _token_ids(value: object) -> list[int]:
-    """Normalize a tokenizer's one-dimensional integer return value."""
-    if not isinstance(value, list) or any(not isinstance(token, int) for token in value):
-        raise TrainerServiceError("the model chat template returned an unsupported token value")
-    return value
 
 
 def _gradient_norm(model: Any) -> float:
