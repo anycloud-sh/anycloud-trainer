@@ -1,0 +1,449 @@
+"""Single-session Hugging Face LoRA runtime for an AnyCloud GPU Service."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import tarfile
+import tempfile
+import threading
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import httpx
+import torch
+from peft import (
+    LoraConfig,
+    get_peft_model,
+    get_peft_model_state_dict,
+    set_peft_model_state_dict,
+)
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoModelForImageTextToText,
+    AutoTokenizer,
+)
+
+from anycloud_trainer.contracts import (
+    ConversationMessage,
+    HealthResponse,
+    OpenSessionRequest,
+    OpenSessionResponse,
+    RenderedDatum,
+    RenderExamplesRequest,
+    RenderExamplesResponse,
+    SaveArtifactRequest,
+    SaveArtifactResponse,
+    TrainBatchRequest,
+    TrainBatchResponse,
+)
+from anycloud_trainer.errors import TrainerServiceError
+
+
+@dataclass(frozen=True)
+class _Datum:
+    """Tokenized input and target mask retained outside GPU memory."""
+
+    datum_id: str
+    example_id: str
+    input_ids: tuple[int, ...]
+    labels: tuple[int, ...]
+    supervised_token_count: int
+
+
+@dataclass
+class _Session:
+    """One exclusive model, optimizer, tokenizer, and rendered-datum collection."""
+
+    session_id: str
+    request: OpenSessionRequest
+    tokenizer: Any
+    model: Any
+    optimizer: Any
+    datums: dict[str, _Datum] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+class HuggingFaceTrainerRuntime:
+    """Execute one stateful LoRA session on the first visible CUDA device."""
+
+    def __init__(self) -> None:
+        """Initialize an empty exclusive-session slot."""
+        self._session: _Session | None = None
+        self._lifecycle_lock = threading.Lock()
+        self._cuda_verified = _verify_cuda_execution()
+
+    def health(self) -> HealthResponse:
+        """Return process liveness and CUDA availability."""
+        return HealthResponse(
+            cuda_available=torch.cuda.is_available(),
+            cuda_verified=self._cuda_verified,
+            active_session=self._session is not None,
+        )
+
+    def open_session(self, request: OpenSessionRequest) -> OpenSessionResponse:
+        """Load one base model, attach LoRA weights, and optionally restore state."""
+        if not torch.cuda.is_available():
+            raise TrainerServiceError("CUDA is unavailable", status_code=503)
+        with self._lifecycle_lock:
+            if self._session is not None:
+                raise TrainerServiceError("a training session is already active", status_code=409)
+            torch.manual_seed(request.seed)
+            torch.cuda.manual_seed_all(request.seed)
+            tokenizer = AutoTokenizer.from_pretrained(
+                request.base_model,
+                revision=request.model_revision,
+            )
+            if tokenizer.pad_token_id is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            configuration = AutoConfig.from_pretrained(
+                request.base_model,
+                revision=request.model_revision,
+            )
+            model_factory = (
+                AutoModelForImageTextToText
+                if hasattr(configuration, "vision_config")
+                else AutoModelForCausalLM
+            )
+            model = model_factory.from_pretrained(
+                request.base_model,
+                revision=request.model_revision,
+                config=configuration,
+                dtype=torch.bfloat16,
+                device_map={"": 0},
+                attn_implementation="sdpa",
+            )
+            text_configuration = getattr(model.config, "text_config", model.config)
+            text_configuration.use_cache = False
+            model = get_peft_model(
+                model,
+                LoraConfig(
+                    r=request.lora_rank,
+                    lora_alpha=request.lora_rank * 2,
+                    lora_dropout=0.0,
+                    bias="none",
+                    task_type="CAUSAL_LM",
+                    target_modules="all-linear",
+                    exclude_modules=r".*visual.*",
+                ),
+            )
+            model.train()
+            optimizer = torch.optim.AdamW(
+                [parameter for parameter in model.parameters() if parameter.requires_grad],
+                lr=1e-4,
+            )
+            if request.resume_download_url is not None:
+                self._restore_state(
+                    str(request.resume_download_url),
+                    request=request,
+                    model=model,
+                    optimizer=optimizer,
+                )
+            session_id = uuid.uuid4().hex
+            self._session = _Session(
+                session_id=session_id,
+                request=request,
+                tokenizer=tokenizer,
+                model=model,
+                optimizer=optimizer,
+            )
+            return OpenSessionResponse(session_id=session_id)
+
+    def render_examples(
+        self, session_id: str, request: RenderExamplesRequest
+    ) -> RenderExamplesResponse:
+        """Render final-assistant supervision while trimming context only."""
+        session = self._require_session(session_id)
+        rendered: list[RenderedDatum] = []
+        with session.lock:
+            for example in request.examples:
+                messages = [_message_payload(message) for message in example.messages]
+                full_tokens = _token_ids(
+                    session.tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=False,
+                    )
+                )
+                prefix_tokens = _token_ids(
+                    session.tokenizer.apply_chat_template(
+                        messages[:-1],
+                        tokenize=True,
+                        add_generation_prompt=True,
+                    )
+                )
+                if full_tokens[: len(prefix_tokens)] != prefix_tokens:
+                    raise TrainerServiceError(
+                        "the model chat template did not preserve the target boundary for "
+                        f"{example.example_id}"
+                    )
+                prefix_length = len(prefix_tokens)
+                maximum_tokens = session.request.maximum_datum_tokens
+                if maximum_tokens is not None and len(full_tokens) > maximum_tokens:
+                    trim_count = len(full_tokens) - maximum_tokens
+                    if trim_count > prefix_length:
+                        raise TrainerServiceError(
+                            "maximum_datum_tokens cannot retain the complete supervised target "
+                            f"for {example.example_id}"
+                        )
+                    full_tokens = full_tokens[trim_count:]
+                    prefix_length -= trim_count
+                supervised_token_count = len(full_tokens) - prefix_length
+                if supervised_token_count <= 0:
+                    raise TrainerServiceError(
+                        "the model chat template produced no supervised tokens for "
+                        f"{example.example_id}"
+                    )
+                labels = (-100,) * prefix_length + tuple(full_tokens[prefix_length:])
+                datum_id = hashlib.sha256(
+                    json.dumps(
+                        {
+                            "session_id": session_id,
+                            "example_id": example.example_id,
+                            "tokens": full_tokens,
+                            "labels": labels,
+                        },
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()
+                datum = _Datum(
+                    datum_id=datum_id,
+                    example_id=example.example_id,
+                    input_ids=tuple(full_tokens),
+                    labels=labels,
+                    supervised_token_count=supervised_token_count,
+                )
+                session.datums[datum_id] = datum
+                rendered.append(
+                    RenderedDatum(
+                        datum_id=datum_id,
+                        example_id=example.example_id,
+                        supervised_token_count=supervised_token_count,
+                    )
+                )
+        return RenderExamplesResponse(datums=tuple(rendered))
+
+    def train_batch(self, session_id: str, request: TrainBatchRequest) -> TrainBatchResponse:
+        """Perform one forward, backward, and AdamW update over retained datums."""
+        session = self._require_session(session_id)
+        with session.lock:
+            try:
+                datums = [session.datums[datum_id] for datum_id in request.datum_ids]
+            except KeyError as exc:
+                raise TrainerServiceError("the batch names an unknown rendered datum") from exc
+            maximum_length = max(len(datum.input_ids) for datum in datums)
+            pad_token_id = int(session.tokenizer.pad_token_id)
+            input_rows: list[list[int]] = []
+            label_rows: list[list[int]] = []
+            attention_rows: list[list[int]] = []
+            for datum in datums:
+                padding = maximum_length - len(datum.input_ids)
+                input_rows.append([*datum.input_ids, *([pad_token_id] * padding)])
+                label_rows.append([*datum.labels, *([-100] * padding)])
+                attention_rows.append([*([1] * len(datum.input_ids)), *([0] * padding)])
+            input_ids = torch.tensor(input_rows, dtype=torch.long, device="cuda")
+            labels = torch.tensor(label_rows, dtype=torch.long, device="cuda")
+            attention_mask = torch.tensor(attention_rows, dtype=torch.long, device="cuda")
+            for group in session.optimizer.param_groups:
+                group["lr"] = request.learning_rate
+            session.optimizer.zero_grad(set_to_none=True)
+            output = session.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+            loss = output.loss
+            if loss is None or not torch.isfinite(loss):
+                raise TrainerServiceError("the training step produced a non-finite loss")
+            loss.backward()
+            gradient_norm = _gradient_norm(session.model)
+            if not math.isfinite(gradient_norm):
+                raise TrainerServiceError("the training step produced a non-finite gradient norm")
+            session.optimizer.step()
+            torch.cuda.synchronize()
+            return TrainBatchResponse(
+                loss=float(loss.detach().cpu()),
+                gradient_norm=gradient_norm,
+                input_token_count=sum(len(datum.input_ids) for datum in datums),
+                supervised_token_count=sum(datum.supervised_token_count for datum in datums),
+            )
+
+    def save_artifact(self, session_id: str, request: SaveArtifactRequest) -> SaveArtifactResponse:
+        """Serialize and upload resumable state or final PEFT sampling weights."""
+        session = self._require_session(session_id)
+        with session.lock, tempfile.TemporaryDirectory(prefix="anycloud-trainer-") as directory:
+            root = Path(directory)
+            if request.kind == "state":
+                artifact_path = root / "trainer-state.pt"
+                torch.save(
+                    {
+                        "base_model": session.request.base_model,
+                        "model_revision": session.request.model_revision,
+                        "lora_rank": session.request.lora_rank,
+                        "seed": session.request.seed,
+                        "adapter_state": _cpu_tree(get_peft_model_state_dict(session.model)),
+                        "optimizer_state": _cpu_tree(session.optimizer.state_dict()),
+                        "torch_rng_state": torch.get_rng_state(),
+                        "cuda_rng_state_all": torch.cuda.get_rng_state_all(),
+                    },
+                    artifact_path,
+                )
+            else:
+                adapter_directory = root / "adapter"
+                session.model.save_pretrained(adapter_directory, safe_serialization=True)
+                session.tokenizer.save_pretrained(adapter_directory)
+                artifact_path = root / "sampling-adapter.tar.gz"
+                with tarfile.open(artifact_path, "w:gz") as archive:
+                    archive.add(adapter_directory, arcname="adapter")
+            digest = _sha256_file(artifact_path)
+            payload = artifact_path.read_bytes()
+            try:
+                response = httpx.put(
+                    str(request.upload_url),
+                    content=payload,
+                    headers={"Content-Type": "application/octet-stream"},
+                    timeout=900,
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise TrainerServiceError(
+                    "the trainer artifact upload failed", status_code=502
+                ) from exc
+            return SaveArtifactResponse(sha256=digest, size_bytes=len(payload))
+
+    def _require_session(self, session_id: str) -> _Session:
+        """Return the live session only when the exact opaque identity matches."""
+        session = self._session
+        if session is None or session.session_id != session_id:
+            raise TrainerServiceError("training session not found", status_code=404)
+        return session
+
+    def _restore_state(
+        self,
+        download_url: str,
+        *,
+        request: OpenSessionRequest,
+        model: Any,
+        optimizer: Any,
+    ) -> None:
+        """Download and verify one state artifact before applying any weight change."""
+        try:
+            response = httpx.get(download_url, timeout=900)
+            response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise TrainerServiceError("the trainer state download failed", status_code=502) from exc
+        with tempfile.NamedTemporaryFile(prefix="anycloud-state-", suffix=".pt") as state_file:
+            state_file.write(response.content)
+            state_file.flush()
+            state = torch.load(state_file.name, map_location="cpu", weights_only=True)
+        if not isinstance(state, dict):
+            raise TrainerServiceError("the trainer state has an invalid root value")
+        expected = (
+            request.base_model,
+            request.model_revision,
+            request.lora_rank,
+            request.seed,
+        )
+        observed = (
+            state.get("base_model"),
+            state.get("model_revision"),
+            state.get("lora_rank"),
+            state.get("seed"),
+        )
+        if observed != expected:
+            raise TrainerServiceError(
+                "the trainer state does not match the requested model settings"
+            )
+        required = (
+            "adapter_state",
+            "optimizer_state",
+            "torch_rng_state",
+            "cuda_rng_state_all",
+        )
+        if any(key not in state for key in required):
+            raise TrainerServiceError("the trainer state is missing required values")
+        try:
+            set_peft_model_state_dict(model, state["adapter_state"])
+            optimizer.load_state_dict(state["optimizer_state"])
+            torch.set_rng_state(state["torch_rng_state"])
+            torch.cuda.set_rng_state_all(state["cuda_rng_state_all"])
+        except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+            raise TrainerServiceError("the trainer state could not be restored") from exc
+        _move_optimizer_state(optimizer, device=torch.device("cuda"))
+
+
+def _verify_cuda_execution() -> bool:
+    """Prove that the visible accelerator can allocate, launch work, and synchronize."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        left = torch.tensor([2.0], device="cuda")
+        result = left * 3.0
+        torch.cuda.synchronize()
+        return float(result.cpu()[0]) == 6.0
+    except RuntimeError:
+        return False
+
+
+def _message_payload(message: ConversationMessage) -> dict[str, object]:
+    """Convert one validated message into the sparse mapping expected by chat templates."""
+    payload: dict[str, object] = {"role": message.role, "content": message.content}
+    if message.tool_calls:
+        payload["tool_calls"] = [call.model_dump(mode="json") for call in message.tool_calls]
+    if message.tool_call_id is not None:
+        payload["tool_call_id"] = message.tool_call_id
+    if message.name is not None:
+        payload["name"] = message.name
+    return payload
+
+
+def _token_ids(value: object) -> list[int]:
+    """Normalize a tokenizer's one-dimensional integer return value."""
+    if not isinstance(value, list) or any(not isinstance(token, int) for token in value):
+        raise TrainerServiceError("the model chat template returned an unsupported token value")
+    return value
+
+
+def _gradient_norm(model: Any) -> float:
+    """Compute the finite global L2 norm without clipping gradients."""
+    squared_norm = 0.0
+    for parameter in model.parameters():
+        if parameter.grad is None:
+            continue
+        norm = float(parameter.grad.detach().float().norm(2).cpu())
+        squared_norm += norm * norm
+    return math.sqrt(squared_norm)
+
+
+def _cpu_tree(value: Any) -> Any:
+    """Move every tensor in a nested optimizer or adapter state onto CPU."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: _cpu_tree(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_cpu_tree(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_cpu_tree(item) for item in value)
+    return value
+
+
+def _move_optimizer_state(optimizer: Any, *, device: torch.device) -> None:
+    """Move restored optimizer tensors to the active model device."""
+    for state in optimizer.state.values():
+        for key, value in state.items():
+            if isinstance(value, torch.Tensor):
+                state[key] = value.to(device)
+
+
+def _sha256_file(path: Path) -> str:
+    """Return the lowercase SHA-256 digest of one artifact file."""
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
