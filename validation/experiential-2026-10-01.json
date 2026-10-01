@@ -1,0 +1,128 @@
+{
+  "capacity_attempts": [
+    {
+      "estimated_cost_usd": 0,
+      "id": "exp-trainer-refresh-b-261001",
+      "diagnosis": "capacity-exhausted; instance did not receive an IP while booting",
+      "state": "terminated",
+      "vm_assigned": false
+    },
+    {
+      "estimated_cost_usd": 0,
+      "id": "exp-train-b2-261001",
+      "diagnosis": "terminated during provisioning without a VM assignment",
+      "state": "terminated",
+      "vm_assigned": false
+    }
+  ],
+  "deployments": [
+    {
+      "cost_source": "estimated",
+      "estimated_cost_usd": 0.17491540000000003,
+      "id": "exp-trainer-refresh-a-261001",
+      "provider": "Lambda",
+      "provider_cleaned": true,
+      "region": "us-east-1",
+      "role": "initial",
+      "state": "terminated",
+      "vm_type": "gpu_1x_a10"
+    },
+    {
+      "cost_source": "estimated",
+      "estimated_cost_usd": 0.13750986055555556,
+      "id": "exp-train-b3-261001",
+      "provider": "AWS",
+      "provider_cleaned": true,
+      "region": "us-east-1",
+      "role": "resume",
+      "state": "terminated",
+      "vm_type": "g5.xlarge"
+    },
+    {
+      "cost_source": "estimated",
+      "estimated_cost_usd": 0.1349996111111111,
+      "id": "exp-train-c-261001",
+      "provider": "AWS",
+      "provider_cleaned": true,
+      "region": "us-east-2",
+      "role": "load",
+      "state": "terminated",
+      "vm_type": "g5.xlarge"
+    }
+  ],
+  "estimated_total_gpu_cost_usd": 0.447425,
+  "image": {
+    "immutable_reference": "ghcr.io/anycloud-sh/anycloud-trainer@sha256:1f18acebd0918a74c7d0c6955e8f351a1276d84878fc2c819445397b26fb258f",
+    "platform_digest": "sha256:18abbbbd9d1fc3b34476f4e7b8f69964cb3a4944847948d379c54c5bc8f182fe"
+  },
+  "model": {
+    "id": "Qwen/Qwen3.5-4B",
+    "lora_rank": 8,
+    "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
+  },
+  "phases": {
+    "initial": {
+      "api_status_codes": [
+        200,
+        200,
+        200,
+        200,
+        200,
+        200
+      ],
+      "checkpoint_resource_id": "s3://anycloud-wmo-trainer-validation-260820-afc0e164/experiential-refresh-261001/state/step-000001.pt",
+      "checkpoint_size_bytes": 195391045,
+      "gradient_norm": 0.14250999181223037,
+      "loss": 0.002257527783513069,
+      "result": "passed",
+      "supervised_token_count": 5
+    },
+    "load": {
+      "api_status_codes": [
+        200,
+        200,
+        200,
+        200
+      ],
+      "loaded_adapter_resource_id": "s3://anycloud-wmo-trainer-validation-260820-afc0e164/experiential-refresh-261001/sampling/final-adapter.tar.gz",
+      "rendered_example_id": "anycloud-validation-example",
+      "result": "passed",
+      "supervised_token_count": 5
+    },
+    "resume": {
+      "adapter_resource_id": "s3://anycloud-wmo-trainer-validation-260820-afc0e164/experiential-refresh-261001/sampling/final-adapter.tar.gz",
+      "adapter_size_bytes": 58800472,
+      "api_status_codes": [
+        200,
+        200,
+        200,
+        200,
+        200,
+        200
+      ],
+      "gradient_norm": 0.10577664485449036,
+      "loss": 0.0018641522619873285,
+      "restored_resource_id": "s3://anycloud-wmo-trainer-validation-260820-afc0e164/experiential-refresh-261001/state/step-000001.pt",
+      "result": "passed",
+      "supervised_token_count": 5
+    }
+  },
+  "result": "passed",
+  "schema_version": 1,
+  "scope": "Experiential injected Python TrainerBackend seam; exp optimize model CLI remains Tinker-only",
+  "source": {
+    "adapter_branch": "anycloud-trainer-backend-v2",
+    "adapter_repository": "https://github.com/anycloud-sh/world-model-optimizer",
+    "adapter_revision": "7a135c8c67a6be3c44541d4aa1666591c1f130b5",
+    "upstream_repository": "https://github.com/experientiallabs/experiential",
+    "upstream_revision": "42e516c6cbb0ddaecf496b221b03db5dcd0dc02d"
+  },
+  "storage": {
+    "bucket": "anycloud-wmo-trainer-validation-260820-afc0e164",
+    "prefix": "experiential-refresh-261001",
+    "provider": "S3",
+    "region": "us-west-2",
+    "signed_urls_retained": false
+  },
+  "validated_at": "2026-10-01T20:51:37.063533+00:00"
+}

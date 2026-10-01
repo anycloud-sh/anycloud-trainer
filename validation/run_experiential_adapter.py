@@ -1,4 +1,4 @@
-"""Drive bounded WMO adapter validation against successive AnyCloud GPU services."""
+"""Drive bounded Experiential adapter validation against successive AnyCloud GPU services."""
 
 from __future__ import annotations
 
@@ -16,21 +16,19 @@ from urllib.parse import urlsplit
 import boto3
 import httpx
 from botocore.config import Config
-from pydantic import SecretStr
-from wmo.common.core.artifacts import ArtifactInput
-from wmo.common.models import AssistantAction
-from wmo.optimize.model.sft.anycloud import (
+from exp.common.core.artifacts import ArtifactInput
+from exp.common.models import AssistantAction
+from exp.optimize.model.sft.anycloud import (
     AnyCloudArtifactUpload,
     AnyCloudTrainerBackend,
     AnyCloudTrainerSession,
 )
-from wmo.optimize.model.sft.contracts import SFTExample, SFTMessage, TraceExampleSource
-from wmo.optimize.model.sft.training import TinkerSFTSpec
+from exp.optimize.model.sft.contracts import SFTExample, SFTMessage, TraceExampleSource
+from exp.optimize.model.sft.training import TinkerSFTSpec
+from pydantic import SecretStr
 
 MODEL = "Qwen/Qwen3.5-4B"
 MODEL_REVISION = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
-WMO_UPSTREAM_REVISION = "b7593f7e5a1da047012edde1981e3efec34f0d9c"
-WMO_ADAPTER_REVISION = "25af24b478e307e565d68afb9dacb53f11ac6469"
 _DIGEST = "a" * 64
 
 
@@ -186,7 +184,7 @@ def _spec() -> TinkerSFTSpec:
 
 
 def _example() -> SFTExample:
-    """Return one tiny accepted WMO example with an observable assistant target."""
+    """Return one tiny accepted Experiential example with an observable assistant target."""
     return SFTExample(
         example_id="anycloud-validation-example",
         leakage_group_id="anycloud-validation-lineage",
@@ -249,7 +247,7 @@ def _health(client: httpx.Client) -> dict[str, object]:
 
 
 def _backend(client: httpx.Client, store: _S3ArtifactStore) -> AnyCloudTrainerBackend:
-    """Compose the exact WMO backend under validation."""
+    """Compose the exact Experiential backend under validation."""
     return AnyCloudTrainerBackend(
         client,
         store,
@@ -305,7 +303,7 @@ def _run_load_phase(
     store: _S3ArtifactStore,
     sampling_resource_id: str,
 ) -> dict[str, object]:
-    """Load the exported adapter into a fresh GPU process and render a WMO datum."""
+    """Load the exported adapter into a fresh GPU process and render a Experiential datum."""
     journal = _ResponseJournal()
     started_at = datetime.now(UTC).isoformat()
     started = time.monotonic()
@@ -352,6 +350,8 @@ def _arguments() -> argparse.Namespace:
     """Parse one explicit validation phase and its caller-owned resources."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=("initial", "resume", "load"), required=True)
+    parser.add_argument("--upstream-revision", required=True)
+    parser.add_argument("--adapter-revision", required=True)
     parser.add_argument("--service-url", required=True)
     parser.add_argument("--resolve-ip")
     parser.add_argument("--bucket", required=True)
@@ -405,8 +405,8 @@ def main() -> None:
         {
             "model": MODEL,
             "model_revision": MODEL_REVISION,
-            "wmo_upstream_revision": WMO_UPSTREAM_REVISION,
-            "wmo_adapter_revision": WMO_ADAPTER_REVISION,
+            "experiential_upstream_revision": arguments.upstream_revision,
+            "experiential_adapter_revision": arguments.adapter_revision,
         }
     )
     sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
