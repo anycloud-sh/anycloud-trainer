@@ -1,7 +1,7 @@
 # AnyCloud Trainer
 
-Run Experiential-compatible LoRA training on a Lambda GPU through AnyCloud, with resumable checkpoints and
-a portable PEFT adapter that survive service restarts.
+Run Experiential-compatible LoRA training on a cloud GPU through AnyCloud, with resumable checkpoints
+and a portable PEFT adapter that survive service restarts. Validated on Lambda A10 and AWS A10G.
 
 This repository contains an authenticated, stateful training service. A CPU-side client keeps the
 dataset and training loop, while the service performs tokenization, forward and backward passes,
