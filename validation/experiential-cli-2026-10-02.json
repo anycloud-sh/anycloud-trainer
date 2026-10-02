@@ -1,0 +1,106 @@
+{
+  "deployments": [
+    {
+      "cost_source": "estimated",
+      "estimated_cost_usd": 0.6301,
+      "id": "exp-cli-261002",
+      "image": "ghcr.io/anycloud-sh/anycloud-trainer@sha256:1f18acebd0918a74c7d0c6955e8f351a1276d84878fc2c819445397b26fb258f",
+      "provider": "Lambda",
+      "provider_cleaned": true,
+      "region": "us-east-1",
+      "role": "run 1 (adapter save timed out)",
+      "state": "terminated",
+      "vm_type": "gpu_1x_a10"
+    },
+    {
+      "cost_source": "estimated",
+      "estimated_cost_usd": 0.1945,
+      "id": "exp-cli2-261002",
+      "image": "ghcr.io/anycloud-sh/anycloud-trainer@sha256:4da525be9a952951c01a0234f91ae2574051add1c4039fd6a3b19ce11c42391d",
+      "provider": "Lambda",
+      "provider_cleaned": true,
+      "region": "us-east-1",
+      "role": "run 2 (passed)",
+      "state": "terminated",
+      "vm_type": "gpu_1x_a10"
+    }
+  ],
+  "estimated_total_gpu_cost_usd": 0.8246,
+  "limits": [
+    "one optimizer step on a 4-example project; resume was validated separately through the Python seam",
+    "Experiential cannot serve anycloud aliases yet; the registered alias points at a PEFT adapter in S3"
+  ],
+  "local_dns_note": "the local ISP resolver cached NXDOMAIN for the new service hostname, so the exp process pinned that one hostname to the 1.1.1.1 answer; TLS used the real hostname",
+  "project": {
+    "base_model": "Qwen/Qwen3.5-4B",
+    "how_created": "completed interactions written through Experiential's RuntimeInteractionJournal, as its own CLI tests do; no live gateway traffic",
+    "price_per_hour_usd": 1.29,
+    "routed_interactions": 4,
+    "training_defaults": {
+      "batch_size": 4,
+      "learning_rate": 0.0001,
+      "lora_rank": 32,
+      "maximum_cost_usd": 5.0,
+      "maximum_datum_tokens": 4096
+    }
+  },
+  "result": "passed",
+  "run_1": {
+    "cause": "the trainer compressed the rank-32 adapter archive at gzip level 9, which took longer than the 100 s proxy timeout; the upload completed after the client had failed",
+    "error": "AnyCloud trainer could not save sampling artifact: HTTP 524",
+    "fix": "anycloud-trainer f18ab9b compresses adapter archives at gzip level 1",
+    "measured_on_trainer_host": {
+      "archive_tar_bytes": 279818240,
+      "gzip_level_1_seconds": 5.4,
+      "gzip_level_9_seconds": 140.1,
+      "s3_download_seconds": 1.6
+    },
+    "result": "failed"
+  },
+  "run_2": {
+    "adapter": {
+      "encryption": "AES256",
+      "resource_id": "s3://anycloud-exp-cli-261002-c69145ed/anycloud-demo-run2/sampling/tinker-sft-run-e47cece1dec97ea3fe6a-final",
+      "size_bytes": 150041777
+    },
+    "checkpoint": {
+      "encryption": "AES256",
+      "resource_id": "s3://anycloud-exp-cli-261002-c69145ed/anycloud-demo-run2/state/tinker-sft-run-e47cece1dec97ea3fe6a-attempt-1-step-1",
+      "size_bytes": 779760901
+    },
+    "checkpoint_count": 1,
+    "cli_output": "Verified completed W13 SFT and registered model alias 'anycloud-demo-sft-c7b5df18feec'.",
+    "completed_at": "2026-10-02T20:52:58Z",
+    "completed_result_reverified": true,
+    "experiential_recorded_cost_usd": {
+      "provenance": "estimated",
+      "value": 0.00047073172025799675
+    },
+    "registered_alias": "anycloud-demo-sft-c7b5df18feec",
+    "result": "passed",
+    "result_id": "tinker-sft-result-1cb911d6616a3e58f5ee",
+    "run_id": "tinker-sft-run-e47cece1dec97ea3fe6a",
+    "started_at": "2026-10-02T20:52:23Z",
+    "training_step_count": 1
+  },
+  "schema_version": 1,
+  "scope": "exp optimize model --trainer anycloud, the Experiential CLI command, end to end against a live AnyCloud trainer service",
+  "source": {
+    "adapter_branch": "anycloud-trainer-backend-v2",
+    "adapter_repository": "https://github.com/anycloud-sh/world-model-optimizer",
+    "adapter_revision": "1eb37db1",
+    "experiential_version": "experiential==0.7.141",
+    "upstream_repository": "https://github.com/experientiallabs/experiential",
+    "upstream_revision": "42e516c6cbb0ddaecf496b221b03db5dcd0dc02d"
+  },
+  "storage": {
+    "bucket": "anycloud-exp-cli-261002-c69145ed",
+    "provider": "S3",
+    "region": "us-east-1",
+    "signed_urls_retained": false,
+    "versioning": "Enabled"
+  },
+  "trainer_image": "ghcr.io/anycloud-sh/anycloud-trainer@sha256:4da525be9a952951c01a0234f91ae2574051add1c4039fd6a3b19ce11c42391d",
+  "trainer_source_revision": "222bdc4df63e442e0a0bff83e042b8a1dc1a75fa",
+  "validated_at": "2026-10-02T20:52:58Z"
+}

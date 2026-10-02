@@ -21,14 +21,38 @@ The first integration target is the `TrainerBackend` contract in Experiential La
 Create an AnyCloud named secret called `anycloud-trainer` with one entry, `TRAINER_TOKEN`, then run:
 
 ```bash
-anycloud service ghcr.io/anycloud-sh/anycloud-trainer@sha256:1f18acebd0918a74c7d0c6955e8f351a1276d84878fc2c819445397b26fb258f --id exp-anycloud-trainer --credentials lambda --vm-type gpu_1x_a10 --secret anycloud-trainer --disk-size 160 --gpus all
+anycloud service ghcr.io/anycloud-sh/anycloud-trainer@sha256:4da525be9a952951c01a0234f91ae2574051add1c4039fd6a3b19ce11c42391d --id exp-anycloud-trainer --credentials lambda --vm-type gpu_1x_a10 --secret anycloud-trainer --disk-size 160 --gpus all
 ```
 
 The public GHCR package is connected to this repository. Release tag `v0.1.0` points to the same
 validated OCI index; the digest above is the immutable form. AnyCloud assigns `PORT=8088` and
 exposes the service at `https://exp-anycloud-trainer.anycloud.sh`.
 
-## Current-code validation
+## Experiential CLI validation
+
+On 2026-10-02, Experiential's own command trained through this service on a Lambda A10:
+
+```bash
+exp optimize model PROJECT --trainer anycloud \
+  --anycloud-connection anycloud-trainer --anycloud-url https://exp-anycloud-trainer.anycloud.sh \
+  --anycloud-token-env TRAINER_TOKEN --base-model-alias qwen35-4b --base-model Qwen/Qwen3.5-4B \
+  --anycloud-artifact-prefix s3://YOUR-BUCKET/PREFIX --anycloud-artifact-region us-east-1 \
+  --anycloud-price-per-hour-usd 1.29
+```
+
+The command stored an `anycloud` connection, priced spend consent by GPU-hour, trained, saved a
+resumable checkpoint and the PEFT adapter to S3 through short-lived signed URLs, re-verified the
+completed run, and registered the trained model alias. The
+[`CLI validation receipt`](validation/experiential-cli-2026-10-02.json) records the revisions,
+artifacts, cost, and cleanup. Its first attempt failed while saving the adapter: compressing the
+rank-32 archive at gzip level 9 took 140 s, longer than the 100 s proxy timeout. The image above
+compresses at level 1 (5.4 s for the same file). The run used a four-interaction project, and
+Experiential cannot serve `anycloud` aliases yet, so the registered alias points at the adapter in
+S3. The `--trainer anycloud` option lives on the
+[`anycloud-trainer-backend-v2`](https://github.com/anycloud-sh/world-model-optimizer/tree/anycloud-trainer-backend-v2)
+branch.
+
+## Python interface validation
 
 On 2026-10-01, the current Experiential `TrainerBackend` adapter completed the three-phase GPU
 validation against the same immutable trainer image. The first Lambda A10 service trained and
@@ -37,8 +61,8 @@ AWS A10G service restored the checkpoint, trained another step, and exported a P
 fresh AWS A10G service loaded that adapter and rendered the same example. The
 [`current-code validation receipt`](validation/experiential-2026-10-01.json) records the source
 revisions, results, capacity failures, and cleanup state. All three successful services were
-provider-cleaned; estimated total GPU cost was $0.4474. This validates the injected Python backend,
-not the Tinker-only `exp optimize model` CLI path.
+provider-cleaned; estimated total GPU cost was $0.4474. That run used the earlier image and the
+Python `TrainerBackend` interface directly.
 
 ## Earlier Lambda evidence
 
@@ -79,8 +103,8 @@ and object-store authority; Experiential persists only opaque `s3://` resource i
 [`validation controller`](validation/run_experiential_adapter.py) exercises initial training, restart from
 optimizer state, and a fresh load of the exported PEFT adapter in separate GPU services.
 
-The current `exp optimize model` command constructs Tinker's backend directly. The AnyCloud adapter
-is available through the Python `TrainerBackend` seam and has not been wired into that CLI command.
+`exp optimize model --trainer anycloud` composes this adapter with an S3 artifact store. Without
+`--trainer`, the command keeps using Tinker.
 
 ## Development
 
