@@ -275,7 +275,9 @@ class HuggingFaceTrainerRuntime:
                 session.model.save_pretrained(adapter_directory, safe_serialization=True)
                 session.tokenizer.save_pretrained(adapter_directory)
                 artifact_path = root / "sampling-adapter.tar.gz"
-                with tarfile.open(artifact_path, "w:gz") as archive:
+                # Fastest gzip level: level 9 (the default) spends minutes compressing nearly
+                # incompressible float weights, longer than the proxy allows one request.
+                with tarfile.open(artifact_path, "w:gz", compresslevel=1) as archive:
                     archive.add(adapter_directory, arcname="adapter")
             digest = _sha256_file(artifact_path)
             size_bytes = artifact_path.stat().st_size
